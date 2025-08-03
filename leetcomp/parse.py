@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import time
 from datetime import datetime
 from typing import Any, Generator
 
@@ -139,6 +140,32 @@ def fill_yoe(parsed_content: list[dict[Any, Any]]) -> None:
             item["yoe"] = parsed_content[0]["yoe"]
 
 
+def safe_llm_predict(prompt: str, max_retries: int = 3, retry_delay: int = 5) -> str | None:
+    """Safely call LLM with error handling and retries."""
+    for attempt in range(max_retries):
+        try:
+            response = llm_predict(prompt)
+            return response
+        except KeyError as e:
+            print(f" ! LLM API error (attempt {attempt + 1}/{max_retries}): KeyError {e}")
+            if attempt < max_retries - 1:
+                print(f" ! Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+            else:
+                print(" ! Max retries reached, skipping this post")
+                return None
+        except Exception as e:
+            print(f" ! LLM API error (attempt {attempt + 1}/{max_retries}): {type(e).__name__}: {e}")
+            if attempt < max_retries - 1:
+                print(f" ! Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+            else:
+                print(" ! Max retries reached, skipping this post")
+                return None
+    
+    return None
+
+
 def parse_posts(
     in_comps_path: str,
     out_comps_path: str,
@@ -146,11 +173,12 @@ def parse_posts(
     till_date: datetime | None = None,
 ) -> None:
     n_skips = 0
+    n_processed = 0
     parsed_ids = parsed_ids or set()
 
     for i, post in enumerate(comps_posts_iter(in_comps_path), start=1):
         if i % 20 == 0:
-            print(f"Processed {i} posts; {n_skips} skips")
+            print(f"Processed {i} posts; {n_skips} skips; {n_processed} successfully parsed")
 
         if post["id"] in parsed_ids or not post_should_be_parsed(post):
             n_skips += 1
@@ -161,7 +189,14 @@ def parse_posts(
 
         input_text = f"{post['title']}\n---\n{post['content']}"
         prompt = PARSING_PROMPT.substitute(leetcode_post=input_text)
-        response = llm_predict(prompt)
+        
+        # Use safe LLM prediction with retries
+        response = safe_llm_predict(prompt)
+        if response is None:
+            print(f" x skipping {post['id']}; LLM API failed")
+            n_skips += 1
+            continue
+
         parsed_content = parse_json_markdown(response)
 
         if parsed_content_is_valid(post["id"], parsed_content):
@@ -170,8 +205,14 @@ def parse_posts(
             with open(out_comps_path, "a") as f:
                 for parsed_post in parsed_posts:
                     f.write(json.dumps(parsed_post) + "\n")
+            n_processed += 1
         else:
             n_skips += 1
+
+        # Add a small delay between API calls to be nice to the API
+        time.sleep(1)
+
+    print(f"Final stats: {n_processed} successfully parsed, {n_skips} skipped")
 
 
 def get_parsed_ids(out_comps_path: str) -> set[int]:
